@@ -3,10 +3,11 @@
 
 module Servant.Auth.RolesSpec (spec) where
 
-import Servant.Auth.Roles (CheckRole (..), HasRole (..), Proxy (..), RequireRole, Satisfies (Satisfies), Proof)
+import Servant.Auth.Roles (CheckRole (..), Proof (..), RequireRole, Satisfied, Satisfies (Satisfies), Sing, SomeRole (..))
 import Control.Monad.Except (throwError)
 import Control.Monad.IO.Class (liftIO)
 import Data.ByteString (ByteString)
+import Data.Data (Proxy (..))
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
 import Network.HTTP.Types (Header, HeaderName, hAccept)
 import Network.Wai (Application, Request, requestHeaders)
@@ -25,41 +26,62 @@ import Test.Hspec.Wai.Internal (runWaiSession)
 data UserRole = Viewer | Editor | Admin
   deriving (Eq, Ord, Show)
 
+data SUserRole (r :: UserRole) where
+  SViewer :: SUserRole 'Viewer
+  SEditor :: SUserRole 'Editor
+  SAdmin :: SUserRole 'Admin
+
+type family (a :: UserRole) <=? (b :: UserRole) :: Bool where
+  'Viewer <=? _ = 'True
+  'Editor <=? 'Viewer = 'False
+  'Editor <=? _ = 'True
+  'Admin <=? 'Admin = 'True
+  'Admin <=? _ = 'False
+
+type instance
+  Satisfied (required :: UserRole) (actual :: UserRole) =
+    (required <=? actual) ~ 'True
+
+type instance Sing = SUserRole
+
 instance CheckRole 'Viewer where
   type RoleType 'Viewer = UserRole
-  checkRole _ role = role >= Viewer
+  checkRole SViewer = Just Proof
+  checkRole SEditor = Just Proof
+  checkRole SAdmin = Just Proof
 
 instance CheckRole 'Editor where
   type RoleType 'Editor = UserRole
-  checkRole _ role = role >= Editor
+  checkRole SViewer = Nothing
+  checkRole SEditor = Just Proof
+  checkRole SAdmin = Just Proof
 
 instance CheckRole 'Admin where
   type RoleType 'Admin = UserRole
-  checkRole _ role = role >= Admin
+  checkRole SViewer = Nothing
+  checkRole SEditor = Nothing
+  checkRole SAdmin = Just Proof
 
-data RoleAuth = RoleAuth {roleAuthRole :: UserRole, roleAuthName :: String}
+data RoleAuth (r :: UserRole) = RoleAuth {roleAuthName :: String}
   deriving (Show)
 
-instance HasRole RoleAuth UserRole where
-  getRole = roleAuthRole
+type instance AuthServerData (AuthProtect "role-auth") = SomeRole RoleAuth
 
-type instance AuthServerData (AuthProtect "role-auth") = RoleAuth
-
-parseRole :: Request -> Maybe RoleAuth
+parseRole :: Request -> Maybe (SomeRole RoleAuth)
 parseRole req = case lookup "X-Role" (requestHeaders req) of
-  Just "viewer" -> pure (RoleAuth Viewer "Reed")
-  Just "editor" -> pure (RoleAuth Editor "Lyxia")
-  Just "admin" -> pure (RoleAuth Admin "Sandy")
+  Just "viewer" -> pure $ SomeRole SViewer (RoleAuth "Reed")
+  Just "editor" -> pure $ SomeRole SEditor (RoleAuth "Lyxia")
+  Just "admin" -> pure $ SomeRole SAdmin (RoleAuth "Sandy")
   _ -> Nothing
 
 -- | Reads the "X-Role" header to determine the user's role.
 -- Missing header -> 401. Values: "viewer", "editor", "admin".
-roleAuthHandler :: AuthHandler Request RoleAuth
+roleAuthHandler :: AuthHandler Request (SomeRole RoleAuth)
 roleAuthHandler = mkAuthHandler $ \req ->
   maybe (throwError err401) pure (parseRole req)
 
-banUser :: Proof 'Admin -> RoleAuth -> String
-banUser _prof auth = "banned by " <> roleAuthName auth
+banUser :: Proof 'Admin r -> RoleAuth r -> String
+banUser _prf auth = "banned by " <> roleAuthName auth
 
 --------------------------------------------------------------------------------
 -- Test API (separate paths)
@@ -88,10 +110,10 @@ testServer = adminHandler :<|> editorHandler :<|> viewerHandler
     adminHandler (Satisfies proof auth) = pure (banUser proof auth)
 
     editorHandler :: Satisfies 'Editor RoleAuth -> Handler String
-    editorHandler (Satisfies _proof auth) = pure $ "editor: " <> show (roleAuthRole auth)
+    editorHandler (Satisfies _proof auth) = pure $ "editor: " <> show (roleAuthName auth)
 
     viewerHandler :: Satisfies 'Viewer RoleAuth -> Handler String
-    viewerHandler (Satisfies _proof auth) = pure $ "viewer: " <> show (roleAuthRole auth)
+    viewerHandler (Satisfies _proof auth) = pure $ "viewer: " <> show (roleAuthName auth)
 
 roleApp :: IO Application
 roleApp =
@@ -150,7 +172,7 @@ fallthroughApp =
 -- Test API (auth invocation counting)
 
 -- | Auth handler that increments an IORef each time it is called.
-countingAuthHandler :: IORef Int -> AuthHandler Request RoleAuth
+countingAuthHandler :: IORef Int -> AuthHandler Request (SomeRole RoleAuth)
 countingAuthHandler counter = mkAuthHandler $ \req -> do
   Control.Monad.IO.Class.liftIO $ modifyIORef' counter (+ 1)
   maybe (throwError err401) pure (parseRole req)
@@ -183,13 +205,13 @@ type AnonFallthroughAPI =
 anonFallthroughServer :: Server AnonFallthroughAPI
 anonFallthroughServer = panelAdmin :<|> panelEditor :<|> panelViewer :<|> panelAnon
   where
-    panelAdmin :: Satisfies prf RoleAuth -> Handler String
+    panelAdmin :: Satisfies 'Admin RoleAuth -> Handler String
     panelAdmin _ = pure "admin panel"
 
-    panelEditor :: Satisfies prf RoleAuth -> Handler String
+    panelEditor :: Satisfies 'Editor RoleAuth -> Handler String
     panelEditor _ = pure "editor panel"
 
-    panelViewer :: Satisfies prf RoleAuth -> Handler String
+    panelViewer :: Satisfies 'Viewer RoleAuth -> Handler String
     panelViewer _ = pure "viewer panel"
 
     panelAnon :: Handler String
@@ -204,41 +226,63 @@ anonApp =
       anonFallthroughServer
 
 --------------------------------------------------------------------------------
--- Scheme 2: flat, non-hierarchical roles (exact match via Eq)
+-- Scheme 2: flat, non-hierarchical roles (exact match)
+--
+-- A second scheme living alongside Scheme 1. 'Sing' and 'Satisfied' are open
+-- families indexed by kind, so each role type instantiates them independently
+-- and the two schemes never interact. Note there is no 'Ord' here: sufficiency
+-- is equality, not a hierarchy.
 
 data Region = US | EU | APAC
-  deriving (Eq, Ord, Show)
+  deriving (Eq, Show)
+
+data SRegion (r :: Region) where
+  SUS :: SRegion 'US
+  SEU :: SRegion 'EU
+  SAPAC :: SRegion 'APAC
+
+type family (a :: Region) ==? (b :: Region) :: Bool where
+  'US ==? 'US = 'True
+  'EU ==? 'EU = 'True
+  'APAC ==? 'APAC = 'True
+  _ ==? _ = 'False
+
+type instance
+  Satisfied (required :: Region) (actual :: Region) =
+    (required ==? actual) ~ 'True
+
+type instance Sing = SRegion
 
 instance CheckRole 'US where
   type RoleType 'US = Region
-  checkRole _ role = role == US
+  checkRole SUS = Just Proof
+  checkRole _ = Nothing
 
 instance CheckRole 'EU where
   type RoleType 'EU = Region
-  checkRole _ role = role == EU
+  checkRole SEU = Just Proof
+  checkRole _ = Nothing
 
 instance CheckRole 'APAC where
   type RoleType 'APAC = Region
-  checkRole _ role = role == APAC
+  checkRole SAPAC = Just Proof
+  checkRole _ = Nothing
 
-data RegionAuth = RegionAuth {regionAuthRegion :: Region, regionAuthTenant :: String}
+data RegionAuth (r :: Region) = RegionAuth {regionAuthTenant :: String}
 
-instance HasRole RegionAuth Region where
-  getRole = regionAuthRegion
+type instance AuthServerData (AuthProtect "region-auth") = SomeRole RegionAuth
 
-type instance AuthServerData (AuthProtect "region-auth") = RegionAuth
-
-parseRegion :: Request -> Maybe RegionAuth
+parseRegion :: Request -> Maybe (SomeRole RegionAuth)
 parseRegion req = case lookup "X-Region" (requestHeaders req) of
-  Just "us" -> Just (RegionAuth US "acme-us")
-  Just "eu" -> Just (RegionAuth EU "acme-eu")
-  Just "apac" -> Just (RegionAuth APAC "acme-apac")
+  Just "us" -> Just (SomeRole SUS (RegionAuth "acme-us"))
+  Just "eu" -> Just (SomeRole SEU (RegionAuth "acme-eu"))
+  Just "apac" -> Just (SomeRole SAPAC (RegionAuth "acme-apac"))
   _ -> Nothing
 
-regionAuthHandler :: AuthHandler Request RegionAuth
+regionAuthHandler :: AuthHandler Request (SomeRole RegionAuth)
 regionAuthHandler = mkAuthHandler $ maybe (throwError err401) pure . parseRegion
 
-gdprExport :: Proof 'EU -> RegionAuth -> String
+gdprExport :: Proof 'EU r -> RegionAuth r -> String
 gdprExport _proof auth = "GDPR export for " <> regionAuthTenant auth
 
 type USAPI = RequireRole "region-auth" 'US :> "us" :> Get '[JSON] String

@@ -41,21 +41,27 @@ module Servant.Auth.Roles
   ( -- * Combinator
     RequireRole,
 
-    -- * Type Classes
-    Proof,
-    Satisfies (..),
+    -- * Role Schemes
     CheckRole (..),
-    HasRole (..),
+    Satisfied,
 
-    -- * Re-exports for convenience
-    Proxy (..),
+    -- * Proofs
+    Proof (..),
+    Satisfies (..),
+
+    -- * Auth Wrappers
+    SomeRole (..),
+    AuthFOf,
+
+    -- * Singletons
+    Sing,
   )
 where
 
 --------------------------------------------------------------------------------
 
 import Control.Monad.IO.Class (liftIO)
-import Data.Kind (Type)
+import Data.Kind (Constraint, Type)
 import Data.Proxy (Proxy (..))
 import GHC.TypeLits (Symbol)
 import Network.Wai (Request)
@@ -72,6 +78,12 @@ import Servant.Server.Experimental.Auth (AuthHandler, AuthServerData, unAuthHand
 import Servant.Server.Internal.Delayed (addAuthCheck)
 import Servant.Server.Internal.DelayedIO (DelayedIO, delayedFail, delayedFailFatal, withRequest)
 import Servant.Server.Internal.Handler (runHandler)
+
+--------------------------------------------------------------------------------
+-- hasochism
+
+-- | Maps a role kind to its singleton GADT.
+type family Sing :: k -> Type
 
 --------------------------------------------------------------------------------
 -- Combinator
@@ -120,14 +132,13 @@ data RequireRole (tag :: Symbol) (required :: k)
 --------------------------------------------------------------------------------
 -- Proof
 
--- | A witness that some role satisfies the requirement @required@. The
--- constructor is not exported, so the only way to obtain a 'Proof' is via
--- 'checkAuth' which yields one only after 'checkRole' succeeds.
-data Proof (required :: k) = Proof
+type family Satisfied (required :: kr) (actual :: ka) :: Constraint
 
--- | An authentication value paired with a 'Proof' that it satisfies
--- @required@. This is what handlers receive.
-data Satisfies (required :: k) authz = Satisfies (Proof required) authz
+data Proof (required :: kr) (actual :: ka) where
+  Proof :: (Satisfied required actual) => Proof required actual
+
+data Satisfies (required :: kr) (authF :: ka -> Type) where
+  Satisfies :: Proof required actual -> authF actual -> Satisfies required authF
 
 --------------------------------------------------------------------------------
 -- Type Classes
@@ -168,43 +179,36 @@ class CheckRole (required :: k) where
   type RoleType required :: Type
 
   -- | Check whether the given role value satisfies the requirement @required@.
-  checkRole :: Proxy required -> RoleType required -> Bool
+  checkRole :: Sing (actual :: RoleType required) -> Maybe (Proof required actual)
 
--- | The only way to build a 'Proof'. Given the user's actual role value,
--- produce a witness that it satisfies @required@, or 'Nothing'.
-checkAuth :: CheckRole required => Proxy required -> RoleType required -> Maybe (Proof required)
-checkAuth p role
-  | checkRole p role = Just Proof
-  | otherwise = Nothing
-
-
--- | Extract a role from an authentication context.
---
--- Implement this for your auth type (e.g., @Authz@) to tell the combinator
--- how to get the user's role:
---
--- @
--- instance HasRole Authz UserRole where
---   getRole authz = authz.authzUser.userRole
--- @
-class HasRole auth r | auth -> r where
-  getRole :: auth -> r
+data SomeRole (authF :: k -> Type) where
+  SomeRole :: Sing (r :: k) -> authF r -> SomeRole authF
 
 --------------------------------------------------------------------------------
 -- HasServer Instance
 
+type family AuthFOf (ka :: Type) (e :: Type) :: ka -> Type where
+  AuthFOf ka (SomeRole (f :: ka -> Type)) = f
+
 instance
-  forall tag required api context.
+  forall
+    kr
+    (tag :: Symbol)
+    (required :: kr)
+    (authF :: RoleType required -> Type)
+    api
+    context.
   ( HasServer api context,
+    AuthServerData (AuthProtect tag) ~ SomeRole authF,
     CheckRole required,
-    HasRole (AuthServerData (AuthProtect tag)) (RoleType required),
-    HasContextEntry context (AuthHandler Request (AuthServerData (AuthProtect tag)))
+    HasContextEntry context (AuthHandler Request (SomeRole authF))
   ) =>
   HasServer (RequireRole tag required :> api) context
   where
   type
     ServerT (RequireRole tag required :> api) m =
-      Satisfies required (AuthServerData (AuthProtect tag)) -> ServerT api m
+      Satisfies required (AuthFOf (RoleType required) (AuthServerData (AuthProtect tag))) ->
+      ServerT api m
 
   hoistServerWithContext _ pc nt s =
     hoistServerWithContext (Proxy @api) pc nt . s
@@ -212,16 +216,16 @@ instance
   route _ context subserver =
     route (Proxy @api) context (subserver `addAuthCheck` withRequest authCheck)
     where
-      authHandler' :: Request -> Handler (AuthServerData (AuthProtect tag))
+      authHandler' :: Request -> Handler (SomeRole authF)
       authHandler' = unAuthHandler (getContextEntry context)
 
-      authCheck :: Request -> DelayedIO (Satisfies required (AuthServerData (AuthProtect tag)))
+      authCheck :: Request -> DelayedIO (Satisfies required authF)
       authCheck request = do
         eResult <- liftIO $ runHandler (authHandler' request)
         case eResult of
           Left err -> delayedFailFatal err
-          Right auth ->
-            case checkAuth (Proxy @required) (getRole auth) of
+          Right (SomeRole sActual auth) ->
+            case checkRole sActual of
               Just proof -> pure $ Satisfies proof auth
               Nothing ->
                 delayedFail
