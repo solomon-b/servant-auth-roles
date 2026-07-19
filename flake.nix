@@ -44,7 +44,9 @@
             nativeBuildInputs = [
               hp.cabal-install
               hp.haskell-language-server
+              pkgs.just
               pkgs.nixpkgs-fmt
+              pkgs.ormolu
             ];
           };
         });
