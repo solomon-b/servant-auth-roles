@@ -1,69 +1,47 @@
-
--- | Type-level role-based authorization for Servant.
+-- | Type-level role authorization for Servant. Auth data is indexed by the
+-- user's role. The 'RequireRole' combinator authenticates, decides whether the
+-- actual role satisfies the requirement under a relation you define, and hands
+-- the handler a 'Proof' of it. The relation is arbitrary, so hierarchies,
+-- permission sets, and exact match all work.
 --
--- This module provides the 'RequireRole' combinator for declarative
--- role-based access control in Servant APIs.
+-- This module is the low-level interface. Most users want "Servant.Auth.Roles.TH",
+-- whose derivers generate the 'Decidable' instance, 'ActualK', 'Proof', and
+-- singletons for a role type. Working against this module directly, a downstream
+-- app provides:
 --
--- == Quick Start
---
--- 1. Define your role type and a 'CheckRole' instance for each constructor.
---    'checkRole' receives the user's actual role and returns whether it
---    is sufficient for the required role:
---
--- @
--- data UserRole = User | Host | Staff | Admin
---   deriving (Eq, Ord, Show)
---
--- instance CheckRole 'User  where type RoleType 'User  = UserRole; checkRole _ role = role >= User
--- instance CheckRole 'Host  where type RoleType 'Host  = UserRole; checkRole _ role = role >= Host
--- instance CheckRole 'Staff where type RoleType 'Staff = UserRole; checkRole _ role = role >= Staff
--- instance CheckRole 'Admin where type RoleType 'Admin = UserRole; checkRole _ role = role >= Admin
--- @
---
--- 2. Provide a 'HasRole' instance to extract the role from your auth type:
+-- 1. A role type with singletons (via @singletons-th@'s @genSingletons@).
+-- 2. An auth type indexed by the role, and the existential mapping:
 --
 -- @
--- instance HasRole Authz UserRole where
---   getRole = userRole . authzUser
+-- data Authz (r :: UserRole) = Authz { ... }
+-- type instance AuthServerData (AuthProtect "cookie-auth") = SomeRole Authz
 -- @
 --
--- 3. Use 'RequireRole' in your API (it replaces 'AuthProtect'):
---
--- @
--- type API = RequireRole "cookie-auth" 'Host
---        :> "dashboard"
---        :> Get '[HTML] (Html ())
--- @
---
--- The handler will only run if @checkRole \@\'Host@ returns 'True' for the
--- authenticated user's role. Otherwise, a 403 Forbidden response is returned.
+-- 3. A 'Decidable' instance saying what "sufficient" means.
+-- 4. An 'AuthHandler' that reflects the runtime role into the index with
+--    @toSing@ and packs it as 'SomeRole'.
 module Servant.Auth.Roles
   ( -- * Combinator
     RequireRole,
 
-    -- * Role Schemes
-    CheckRole (..),
-    Satisfied,
+    -- * The decidable relation
+    Decidable (..),
+    ActualK,
+    Proof,
 
-    -- * Proofs
-    Proof (..),
-    Satisfies (..),
-
-    -- * Auth Wrappers
+    -- * Auth wrappers
     SomeRole (..),
-    AuthFOf,
-
-    -- * Singletons
-    Sing,
+    Satisfies (..),
   )
 where
 
 --------------------------------------------------------------------------------
 
 import Control.Monad.IO.Class (liftIO)
-import Data.Kind (Constraint, Type)
+import Data.Kind (Type)
 import Data.Proxy (Proxy (..))
-import GHC.TypeLits (Symbol)
+import Data.Singletons (Sing, SingI (..))
+import GHC.TypeLits (ErrorMessage (..), Symbol, TypeError)
 import Network.Wai (Request)
 import Servant.API (type (:>))
 import Servant.API.Experimental.Auth (AuthProtect)
@@ -80,135 +58,107 @@ import Servant.Server.Internal.DelayedIO (DelayedIO, delayedFail, delayedFailFat
 import Servant.Server.Internal.Handler (runHandler)
 
 --------------------------------------------------------------------------------
--- hasochism
+-- The decidable relation
 
--- | Maps a role kind to its singleton GADT.
-type family Sing :: k -> Type
+-- | Evidence that actual role @r@ satisfies requirement @req@. Each scheme
+-- provides a @data instance@ for its role kinds. The value reaches the handler
+-- inside 'Satisfies'.
+data family Proof (req :: kr) (r :: ka)
+
+-- | The kind of the actual role that @req@ is checked against. Often the same
+-- kind as @req@ (a hierarchy), but not always. A required @'Permission@ is
+-- checked against an actual @[Permission]@. It is a standalone family rather
+-- than an associated type so the fallback 'Decidable' instance need not define it.
+type family ActualK (req :: kr) :: Type
+
+-- | The relation deciding whether actual role @r@ (of kind @ActualK req@)
+-- satisfies requirement @req@ (of kind @kr@). Required and actual kinds may
+-- differ. A required @'Permission@, for instance, is checked against an actual
+-- @[Permission]@, which is how non-hierarchical schemes fit.
+--
+-- You do not normally write this. 'Servant.Auth.Roles.TH.deriveOrdRole',
+-- @deriveEqRole@, and @deriveMemberRole@ generate the instance, its 'ActualK',
+-- and the 'Proof' witness. Spelled out, a hierarchical relation is:
+--
+-- @
+-- type instance ActualK (req :: UserRole) = UserRole
+--
+-- data instance Proof (req :: UserRole) (r :: UserRole) where
+--   UserRoleProof :: (req <= r) ~ 'True => Proof req r
+--
+-- instance Decidable (req :: UserRole) where
+--   decideRole a b = case a %<= b of STrue -> Just UserRoleProof; SFalse -> Nothing
+-- @
+class Decidable (req :: kr) where
+  -- | Decide @'Proof' req r@ at runtime from singletons of both roles.
+  decideRole :: Sing req -> Sing (r :: ActualK req) -> Maybe (Proof req r)
+
+-- | Fallback that gives a useful error when 'RequireRole' is used on a role type
+-- with no deriver, instead of a bare missing-instance message. A real, more
+-- specific instance always wins. This fires only when none exists.
+instance
+  {-# OVERLAPPABLE #-}
+  ( TypeError
+      ( 'Text "No Decidable instance for '"
+          ':<>: 'ShowType kr
+          ':<>: 'Text "'."
+          ':$$: 'Text "Derive one on the role type with Template Haskell, e.g. $(deriveOrdRole ''"
+          ':<>: 'ShowType kr
+          ':<>: 'Text ")."
+          ':$$: 'Text "(deriveOrdRole = hierarchical, deriveEqRole = exact match, deriveMemberRole = permission sets)"
+      )
+  ) =>
+  Decidable (req :: kr)
+  where
+  -- Unreachable at compile time (the TypeError above fires first). The message
+  -- matches that TypeError because this is what surfaces under
+  -- @-fdefer-type-errors@, as in the test suite's fixture.
+  decideRole _ _ =
+    error
+      "No Decidable instance for this role type. Run deriveOrdRole, deriveEqRole, \
+      \or deriveMemberRole on it. (Normally a compile-time TypeError; seen at \
+      \runtime only under -fdefer-type-errors.)"
+
+--------------------------------------------------------------------------------
+-- Auth wrappers
+
+-- | The role is known only at runtime, so it is packed existentially with its
+-- singleton. @'AuthServerData' ('AuthProtect' tag)@ maps to this.
+data SomeRole (authF :: ka -> Type) where
+  SomeRole :: Sing (r :: ka) -> authF r -> SomeRole authF
+
+-- | Recover the role-indexed auth constructor from the existential type. The
+-- actual-role kind @ka@ is passed explicitly so the result kind is determined.
+type family AuthFOf (ka :: Type) (e :: Type) :: ka -> Type where
+  AuthFOf ka (SomeRole (f :: ka -> Type)) = f
+
+-- | What a 'RequireRole' handler receives. It holds the role-indexed auth value
+-- and a 'Proof' that its role satisfies requirement @req@.
+data Satisfies (req :: kr) (authF :: ka -> Type) where
+  Satisfies :: Proof req r -> authF r -> Satisfies req authF
 
 --------------------------------------------------------------------------------
 -- Combinator
 
--- | A Servant combinator that performs authentication and requires a role check.
---
--- This combinator replaces 'AuthProtect' in routes. It takes a @tag@ (matching
--- the tag you would use with 'AuthProtect') and a role @r@. The auth type is
--- resolved via the 'AuthServerData' type family.
---
--- @
--- type ProtectedRoute = RequireRole "cookie-auth" 'Admin :> "admin" :> Get '[JSON] AdminData
--- @
---
--- The combinator calls 'checkRole' to determine whether the authenticated
--- user's role is sufficient. The logic is entirely defined by your 'CheckRole'
--- instances — you can use 'Ord', set membership, or any custom predicate.
---
--- == Route Alternatives
---
--- Role check failures are __non-fatal__, meaning Servant will try the next
--- @(':<|>')@ alternative when the role check fails. This lets you serve
--- different handlers for different role levels on the same path:
---
--- @
--- type API
---   =    RequireRole "cookie-auth" 'Admin  :> "panel" :> Get '[JSON] AdminView
---   :\<|> RequireRole "cookie-auth" 'Member :> "panel" :> Get '[JSON] MemberView
--- @
---
--- __Important:__ when using @>=@ in 'checkRole', routes must be ordered
--- most-restrictive-first. A @'Member@ route whose 'checkRole' uses @>=@
--- would match @Member@, @Host@, @Staff@, /and/ @Admin@, so placing it
--- before a more restrictive route would make the latter unreachable.
---
--- Authentication failures (e.g., missing or invalid credentials) are __fatal__
--- and immediately return the auth handler's error without trying alternatives.
---
--- __Note on re-authentication:__ each @(':<|>')@ alternative runs the
--- 'AuthHandler' independently. In the example above, a @Member@ request
--- runs the auth handler twice — once for the @\'Admin@ route that fails
--- the role check, and once for the @\'Member@ route that succeeds. Keep
--- this in mind if your auth handler is expensive (e.g., database lookups).
-data RequireRole (tag :: Symbol) (required :: k)
-
---------------------------------------------------------------------------------
--- Proof
-
-type family Satisfied (required :: kr) (actual :: ka) :: Constraint
-
-data Proof (required :: kr) (actual :: ka) where
-  Proof :: (Satisfied required actual) => Proof required actual
-
-data Satisfies (required :: kr) (authF :: ka -> Type) where
-  Satisfies :: Proof required actual -> authF actual -> Satisfies required authF
-
---------------------------------------------------------------------------------
--- Type Classes
-
--- | Role check class that determines whether a user's role satisfies a
--- type-level role requirement.
---
--- Each instance defines 'checkRole', which receives the user's actual role
--- and returns whether it is sufficient for the required role @required@.
---
--- === Hierarchical roles (using 'Ord')
---
--- @
--- data UserRole = User | Host | Staff | Admin
---   deriving (Eq, Ord, Show)
---
--- instance CheckRole 'User  where
---   type RoleType 'User = UserRole
---   checkRole _ role = role >= User
---
--- instance CheckRole 'Admin where
---   type RoleType 'Admin = UserRole
---   checkRole _ role = role >= Admin
--- @
---
--- === Permission-set roles
---
--- @
--- data Permission = CanRead | CanEdit | CanDelete
---   deriving (Eq, Ord, Show)
---
--- instance CheckRole 'CanEdit where
---   type RoleType 'CanEdit = Set Permission
---   checkRole _ perms = CanEdit \`Set.member\` perms
--- @
-class CheckRole (required :: k) where
-  -- | The value-level type that this role checks against.
-  type RoleType required :: Type
-
-  -- | Check whether the given role value satisfies the requirement @required@.
-  checkRole :: Sing (actual :: RoleType required) -> Maybe (Proof required actual)
-
-data SomeRole (authF :: k -> Type) where
-  SomeRole :: Sing (r :: k) -> authF r -> SomeRole authF
-
---------------------------------------------------------------------------------
--- HasServer Instance
-
-type family AuthFOf (ka :: Type) (e :: Type) :: ka -> Type where
-  AuthFOf ka (SomeRole (f :: ka -> Type)) = f
+-- | Authenticate and require that the user's role satisfies @req@ under the
+-- 'Decidable' relation. On success the handler receives a 'Satisfies' carrying
+-- the proof. On failure it is a non-fatal 403, so @(:<|>)@ alternatives are
+-- still tried.
+data RequireRole (tag :: Symbol) (req :: kr)
 
 instance
-  forall
-    kr
-    (tag :: Symbol)
-    (required :: kr)
-    (authF :: RoleType required -> Type)
-    api
-    context.
+  forall kr (tag :: Symbol) (req :: kr) (authF :: ActualK req -> Type) api context.
   ( HasServer api context,
     AuthServerData (AuthProtect tag) ~ SomeRole authF,
-    CheckRole required,
+    Decidable req,
+    SingI req,
     HasContextEntry context (AuthHandler Request (SomeRole authF))
   ) =>
-  HasServer (RequireRole tag required :> api) context
+  HasServer (RequireRole tag req :> api) context
   where
   type
-    ServerT (RequireRole tag required :> api) m =
-      Satisfies required (AuthFOf (RoleType required) (AuthServerData (AuthProtect tag))) ->
-      ServerT api m
+    ServerT (RequireRole tag req :> api) m =
+      Satisfies req (AuthFOf (ActualK req) (AuthServerData (AuthProtect tag))) -> ServerT api m
 
   hoistServerWithContext _ pc nt s =
     hoistServerWithContext (Proxy @api) pc nt . s
@@ -219,14 +169,14 @@ instance
       authHandler' :: Request -> Handler (SomeRole authF)
       authHandler' = unAuthHandler (getContextEntry context)
 
-      authCheck :: Request -> DelayedIO (Satisfies required authF)
-      authCheck request = do
-        eResult <- liftIO $ runHandler (authHandler' request)
+      authCheck :: Request -> DelayedIO (Satisfies req authF)
+      authCheck rq = do
+        eResult <- liftIO $ runHandler (authHandler' rq)
         case eResult of
           Left err -> delayedFailFatal err
-          Right (SomeRole sActual auth) ->
-            case checkRole sActual of
-              Just proof -> pure $ Satisfies proof auth
+          Right (SomeRole sr authR) ->
+            case decideRole (sing @req) sr of
+              Just proof -> pure (Satisfies proof authR)
               Nothing ->
                 delayedFail
                   err403

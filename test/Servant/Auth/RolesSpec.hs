@@ -3,12 +3,13 @@
 
 module Servant.Auth.RolesSpec (spec) where
 
-import Servant.Auth.Roles (CheckRole (..), Proof (..), RequireRole, Satisfied, Satisfies (Satisfies), Sing, SomeRole (..))
+import Servant.Auth.Roles (ActualK, Decidable (..), Proof, RequireRole, Satisfies (Satisfies), SomeRole (..))
 import Control.Monad.Except (throwError)
 import Control.Monad.IO.Class (liftIO)
 import Data.ByteString (ByteString)
 import Data.Data (Proxy (..))
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
+import Data.Singletons (Sing, SingI (..))
 import Network.HTTP.Types (Header, HeaderName, hAccept)
 import Network.Wai (Application, Request, requestHeaders)
 import Network.Wai.Test (SResponse)
@@ -38,29 +39,29 @@ type family (a :: UserRole) <=? (b :: UserRole) :: Bool where
   'Admin <=? 'Admin = 'True
   'Admin <=? _ = 'False
 
-type instance
-  Satisfied (required :: UserRole) (actual :: UserRole) =
-    (required <=? actual) ~ 'True
+-- Hierarchical scheme: the actual role has the same kind as the requirement,
+-- and the 'Proof' witnesses that the requirement sits at or below the actual
+-- role under '<=?'.
+type instance ActualK (req :: UserRole) = UserRole
+
+data instance Proof (req :: UserRole) (r :: UserRole) where
+  UserRoleProof :: (req <=? r) ~ 'True => Proof req r
 
 type instance Sing = SUserRole
 
-instance CheckRole 'Viewer where
-  type RoleType 'Viewer = UserRole
-  checkRole SViewer = Just Proof
-  checkRole SEditor = Just Proof
-  checkRole SAdmin = Just Proof
+instance SingI 'Viewer where sing = SViewer
+instance SingI 'Editor where sing = SEditor
+instance SingI 'Admin where sing = SAdmin
 
-instance CheckRole 'Editor where
-  type RoleType 'Editor = UserRole
-  checkRole SViewer = Nothing
-  checkRole SEditor = Just Proof
-  checkRole SAdmin = Just Proof
-
-instance CheckRole 'Admin where
-  type RoleType 'Admin = UserRole
-  checkRole SViewer = Nothing
-  checkRole SEditor = Nothing
-  checkRole SAdmin = Just Proof
+-- One instance for the whole kind: pattern-match both singletons and hand back a
+-- proof exactly when the required role is at or below the actual role.
+instance Decidable (req :: UserRole) where
+  decideRole sReq sActual = case (sReq, sActual) of
+    (SViewer, _) -> Just UserRoleProof
+    (SEditor, SEditor) -> Just UserRoleProof
+    (SEditor, SAdmin) -> Just UserRoleProof
+    (SAdmin, SAdmin) -> Just UserRoleProof
+    _ -> Nothing
 
 data RoleAuth (r :: UserRole) = RoleAuth {roleAuthName :: String}
   deriving (Show)
@@ -247,26 +248,25 @@ type family (a :: Region) ==? (b :: Region) :: Bool where
   'APAC ==? 'APAC = 'True
   _ ==? _ = 'False
 
-type instance
-  Satisfied (required :: Region) (actual :: Region) =
-    (required ==? actual) ~ 'True
+-- Exact-match scheme: sufficiency is equality, so the 'Proof' witnesses
+-- @req '==?' r ~ 'True@ and 'decideRole' only matches equal roles.
+type instance ActualK (req :: Region) = Region
+
+data instance Proof (req :: Region) (r :: Region) where
+  RegionProof :: (req ==? r) ~ 'True => Proof req r
 
 type instance Sing = SRegion
 
-instance CheckRole 'US where
-  type RoleType 'US = Region
-  checkRole SUS = Just Proof
-  checkRole _ = Nothing
+instance SingI 'US where sing = SUS
+instance SingI 'EU where sing = SEU
+instance SingI 'APAC where sing = SAPAC
 
-instance CheckRole 'EU where
-  type RoleType 'EU = Region
-  checkRole SEU = Just Proof
-  checkRole _ = Nothing
-
-instance CheckRole 'APAC where
-  type RoleType 'APAC = Region
-  checkRole SAPAC = Just Proof
-  checkRole _ = Nothing
+instance Decidable (req :: Region) where
+  decideRole sReq sActual = case (sReq, sActual) of
+    (SUS, SUS) -> Just RegionProof
+    (SEU, SEU) -> Just RegionProof
+    (SAPAC, SAPAC) -> Just RegionProof
+    _ -> Nothing
 
 data RegionAuth (r :: Region) = RegionAuth {regionAuthTenant :: String}
 
