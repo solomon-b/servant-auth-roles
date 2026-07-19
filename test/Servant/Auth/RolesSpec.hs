@@ -6,6 +6,7 @@ module Servant.Auth.RolesSpec (spec) where
 
 import Servant.Auth.Roles.TH
 import Servant.Auth.RolesErrorFixture (underivedDecidable)
+import Control.Exception (SomeException, evaluate, try)
 import Control.Monad.Except (throwError)
 import Control.Monad.IO.Class (liftIO)
 import Data.ByteString (ByteString)
@@ -17,7 +18,7 @@ import Servant.API (Get, JSON, type (:<|>) (..), type (:>))
 import Servant.API.Experimental.Auth (AuthProtect)
 import Servant.Server (Context (..), Handler, Server, err401, serveWithContext)
 import Servant.Server.Experimental.Auth (AuthHandler, AuthServerData, mkAuthHandler)
-import Test.Hspec (Spec, describe, it, shouldReturn)
+import Test.Hspec (Spec, describe, expectationFailure, it, shouldContain, shouldReturn)
 import Test.Hspec.Wai (WaiSession, get, matchStatus, request, shouldRespondWith, with)
 import Test.Hspec.Wai.Internal (runWaiSession)
 
@@ -384,3 +385,10 @@ spec = do
       it "no auth -> 401" $ get "/read" `shouldRespondWith` 401
       it "no auth -> 401 (/readwrite)" $
         get "/readwrite" `shouldRespondWith` 401
+
+    describe "developer experience: a role type with no deriver" $
+      it "yields a guiding 'No Decidable instance' error" $ do
+        result <- try (evaluate underivedDecidable) :: IO (Either SomeException ())
+        case result of
+          Left e -> show e `shouldContain` "No Decidable instance"
+          Right () -> expectationFailure "expected the guiding error, but it type-checked"
