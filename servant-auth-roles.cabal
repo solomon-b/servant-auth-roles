@@ -2,14 +2,7 @@ cabal-version: 3.0
 name:          servant-auth-roles
 version:       0.1.0.0
 synopsis:      Type-level role-based authorization combinators for Servant
-description:
-  Declarative, type-level role authorization for Servant. Define a plain role
-  enum, run one Template Haskell splice on it, and gate routes with
-  @RequireRole "tag" 'YourRole@. The combinator authenticates, checks the role
-  against a relation you pick (hierarchy, exact match, or permission-set
-  membership), and hands the handler a compile-time proof that the check passed.
-  See TUTORIAL.md to get started and INTEGRATION.md to add it to an existing
-  AuthProtect app.
+description:   Type-level role authorization for Servant.
 
 license:       BSD-3-Clause
 license-file:  LICENSE
