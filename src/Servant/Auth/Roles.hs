@@ -1,3 +1,4 @@
+
 -- | Type-level role-based authorization for Servant.
 --
 -- This module provides the 'RequireRole' combinator for declarative
@@ -41,6 +42,8 @@ module Servant.Auth.Roles
     RequireRole,
 
     -- * Type Classes
+    Proof,
+    Satisfies (..),
     CheckRole (..),
     HasRole (..),
 
@@ -112,7 +115,19 @@ import Servant.Server.Internal.Handler (runHandler)
 -- runs the auth handler twice — once for the @\'Admin@ route that fails
 -- the role check, and once for the @\'Member@ route that succeeds. Keep
 -- this in mind if your auth handler is expensive (e.g., database lookups).
-data RequireRole (tag :: Symbol) (r :: k)
+data RequireRole (tag :: Symbol) (required :: k)
+
+--------------------------------------------------------------------------------
+-- Proof
+
+-- | A witness that some role satisfies the requirement @required@. The
+-- constructor is not exported, so the only way to obtain a 'Proof' is via
+-- 'checkAuth' which yields one only after 'checkRole' succeeds.
+data Proof (required :: k) = Proof
+
+-- | An authentication value paired with a 'Proof' that it satisfies
+-- @required@. This is what handlers receive.
+data Satisfies (required :: k) authz = Satisfies (Proof required) authz
 
 --------------------------------------------------------------------------------
 -- Type Classes
@@ -121,7 +136,7 @@ data RequireRole (tag :: Symbol) (r :: k)
 -- type-level role requirement.
 --
 -- Each instance defines 'checkRole', which receives the user's actual role
--- and returns whether it is sufficient for the required role @r@.
+-- and returns whether it is sufficient for the required role @required@.
 --
 -- === Hierarchical roles (using 'Ord')
 --
@@ -148,12 +163,20 @@ data RequireRole (tag :: Symbol) (r :: k)
 --   type RoleType 'CanEdit = Set Permission
 --   checkRole _ perms = CanEdit \`Set.member\` perms
 -- @
-class CheckRole (r :: k) where
+class CheckRole (required :: k) where
   -- | The value-level type that this role checks against.
-  type RoleType r :: Type
+  type RoleType required :: Type
 
-  -- | Check whether the given role value satisfies the requirement @r@.
-  checkRole :: Proxy r -> RoleType r -> Bool
+  -- | Check whether the given role value satisfies the requirement @required@.
+  checkRole :: Proxy required -> RoleType required -> Bool
+
+-- | The only way to build a 'Proof'. Given the user's actual role value,
+-- produce a witness that it satisfies @required@, or 'Nothing'.
+checkAuth :: CheckRole required => Proxy required -> RoleType required -> Maybe (Proof required)
+checkAuth p role
+  | checkRole p role = Just Proof
+  | otherwise = Nothing
+
 
 -- | Extract a role from an authentication context.
 --
@@ -171,17 +194,17 @@ class HasRole auth r | auth -> r where
 -- HasServer Instance
 
 instance
-  forall tag r api context.
+  forall tag required api context.
   ( HasServer api context,
-    CheckRole r,
-    HasRole (AuthServerData (AuthProtect tag)) (RoleType r),
+    CheckRole required,
+    HasRole (AuthServerData (AuthProtect tag)) (RoleType required),
     HasContextEntry context (AuthHandler Request (AuthServerData (AuthProtect tag)))
   ) =>
-  HasServer (RequireRole tag r :> api) context
+  HasServer (RequireRole tag required :> api) context
   where
   type
-    ServerT (RequireRole tag r :> api) m =
-      AuthServerData (AuthProtect tag) -> ServerT api m
+    ServerT (RequireRole tag required :> api) m =
+      Satisfies required (AuthServerData (AuthProtect tag)) -> ServerT api m
 
   hoistServerWithContext _ pc nt s =
     hoistServerWithContext (Proxy @api) pc nt . s
@@ -192,15 +215,15 @@ instance
       authHandler' :: Request -> Handler (AuthServerData (AuthProtect tag))
       authHandler' = unAuthHandler (getContextEntry context)
 
-      authCheck :: Request -> DelayedIO (AuthServerData (AuthProtect tag))
-      authCheck req = do
-        eResult <- liftIO $ runHandler (authHandler' req)
+      authCheck :: Request -> DelayedIO (Satisfies required (AuthServerData (AuthProtect tag)))
+      authCheck request = do
+        eResult <- liftIO $ runHandler (authHandler' request)
         case eResult of
           Left err -> delayedFailFatal err
           Right auth ->
-            if checkRole (Proxy @r) (getRole auth)
-              then pure auth
-              else
+            case checkAuth (Proxy @required) (getRole auth) of
+              Just proof -> pure $ Satisfies proof auth
+              Nothing ->
                 delayedFail
                   err403
                     { errBody = "Forbidden: insufficient permissions",

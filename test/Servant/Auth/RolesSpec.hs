@@ -1,8 +1,9 @@
+
 {-# OPTIONS_GHC -Wno-orphans #-}
 
 module Servant.Auth.RolesSpec (spec) where
 
-import Servant.Auth.Roles (CheckRole (..), HasRole (..), Proxy (..), RequireRole)
+import Servant.Auth.Roles (CheckRole (..), HasRole (..), Proxy (..), RequireRole, Satisfies (Satisfies), Proof)
 import Control.Monad.Except (throwError)
 import Control.Monad.IO.Class qualified
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
@@ -78,14 +79,14 @@ type TestAPI = AdminAPI :<|> EditorAPI :<|> ViewerAPI
 testServer :: Server TestAPI
 testServer = adminHandler :<|> editorHandler :<|> viewerHandler
   where
-    adminHandler :: TestAuth -> Handler String
-    adminHandler auth = pure $ "admin: " <> show (testAuthRole auth)
+    adminHandler :: Satisfies 'Admin TestAuth -> Handler String
+    adminHandler (Satisfies _prf auth) = pure $ "admin: " <> show (testAuthRole auth)
 
-    editorHandler ::  TestAuth -> Handler String
-    editorHandler auth = pure $ "editor: " <> show (testAuthRole auth)
+    editorHandler :: Satisfies 'Editor TestAuth -> Handler String
+    editorHandler (Satisfies _prf auth) = pure $ "editor: " <> show (testAuthRole auth)
 
-    viewerHandler ::  TestAuth -> Handler String
-    viewerHandler auth = pure $ "viewer: " <> show (testAuthRole auth)
+    viewerHandler :: Satisfies 'Viewer TestAuth -> Handler String
+    viewerHandler (Satisfies _prf auth) = pure $ "viewer: " <> show (testAuthRole auth)
 
 testApp :: IO Application
 testApp =
@@ -120,17 +121,20 @@ type PanelViewerAPI =
 
 type FallthroughAPI = PanelAdminAPI :<|> PanelEditorAPI :<|> PanelViewerAPI
 
+banUser :: Proof 'Admin -> TestAuth -> String
+banUser _prof auth = "banned by " <> testAuthName auth
+
 fallthroughServer :: Server FallthroughAPI
 fallthroughServer = panelAdmin :<|> panelEditor :<|> panelViewer
   where
-    panelAdmin :: TestAuth -> Handler String
-    panelAdmin _auth = pure "admin panel"
+    panelAdmin :: Satisfies 'Admin TestAuth -> Handler String
+    panelAdmin (Satisfies proof auth) = pure $ banUser proof auth
 
-    panelEditor :: TestAuth -> Handler String
-    panelEditor _auth = pure "editor panel"
+    panelEditor :: Satisfies 'Editor TestAuth -> Handler String
+    panelEditor (Satisfies _proof _auth) = pure "editor panel"
 
-    panelViewer :: TestAuth -> Handler String
-    panelViewer _auth = pure "viewer panel"
+    panelViewer :: Satisfies 'Viewer TestAuth -> Handler String
+    panelViewer (Satisfies _proof _auth) = pure "viewer panel"
 
 fallthroughApp :: IO Application
 fallthroughApp =
@@ -177,13 +181,13 @@ type AnonFallthroughAPI =
 anonFallthroughServer :: Server AnonFallthroughAPI
 anonFallthroughServer = panelAdmin :<|> panelEditor :<|> panelViewer :<|> panelAnon
   where
-    panelAdmin :: TestAuth -> Handler String
+    panelAdmin :: Satisfies prf TestAuth -> Handler String
     panelAdmin _ = pure "admin panel"
 
-    panelEditor :: TestAuth -> Handler String
+    panelEditor :: Satisfies prf TestAuth -> Handler String
     panelEditor _ = pure "editor panel"
 
-    panelViewer :: TestAuth -> Handler String
+    panelViewer :: Satisfies prf TestAuth -> Handler String
     panelViewer _ = pure "viewer panel"
 
     panelAnon :: Handler String
@@ -247,7 +251,7 @@ spec = do
       describe "same path, role-based fallthrough" $ do
         it "Admin matches first (proof passed to banUser)" $ do
           request "GET" "/panel" [("X-Role", "admin"), (hAccept, "application/json")] ""
-            `shouldRespondWith` "\"admin panel\"" {matchStatus = 200}
+            `shouldRespondWith` "\"banned by Sandy\"" {matchStatus = 200}
 
         it "Editor falls through Admin, matches Editor" $ do
           request "GET" "/panel" [("X-Role", "editor"), (hAccept, "application/json")] ""
