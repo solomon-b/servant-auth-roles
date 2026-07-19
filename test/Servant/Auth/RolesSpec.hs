@@ -4,8 +4,6 @@
 
 module Servant.Auth.RolesSpec (spec) where
 
-import Servant.Auth.Roles.TH
-import Servant.Auth.RolesErrorFixture (underivedDecidable)
 import Control.Exception (SomeException, evaluate, try)
 import Control.Monad.Except (throwError)
 import Control.Monad.IO.Class (liftIO)
@@ -16,6 +14,8 @@ import Network.Wai (Application, Request, requestHeaders)
 import Network.Wai.Test (SResponse)
 import Servant.API (Get, JSON, type (:<|>) (..), type (:>))
 import Servant.API.Experimental.Auth (AuthProtect)
+import Servant.Auth.Roles.TH
+import Servant.Auth.RolesErrorFixture (underivedDecidable)
 import Servant.Server (Context (..), Handler, Server, err401, serveWithContext)
 import Servant.Server.Experimental.Auth (AuthHandler, AuthServerData, mkAuthHandler)
 import Test.Hspec (Spec, describe, expectationFailure, it, shouldContain, shouldReturn)
