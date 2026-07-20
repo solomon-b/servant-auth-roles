@@ -219,7 +219,7 @@ For a role type `T` with constructor `C`:
 | `THere`, `TThere`                | `deriveMemberRole`              | membership witnesses                                       |
 | `TAllNil`, `TAllCons`            | `deriveMemberRole`              | subset witnesses for a required list                       |
 | `someT`                          | all three                       | packs a runtime role into `SomeRole`                       |
-| `IsAtleastC r`                   | `deriveOrdRole`                 | constraint alias for `('C <= r) ~ 'True`                   |
+| `IsAtleastC r`                   | `deriveOrdRole`                 | constraint alias for `Atleast 'C r`                        |
 | `AllT`                           | `deriveOrdRole`                 | the constructor list, in hierarchy order                   |
 | `IsC r`                          | `deriveEqRole`                  | constraint alias for `r ~ 'C`                              |
 | `HasC ps`                        | `deriveMemberRole`              | constraint alias for `Member 'C ps`                        |

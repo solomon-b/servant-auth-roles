@@ -37,6 +37,7 @@ module Servant.Auth.Roles
     withAllMembers,
 
     -- * Hierarchy weakening
+    Atleast (..),
     AtleastAll,
     LEQs,
 
@@ -232,17 +233,57 @@ withAllMembers p body =
 --
 -- The fix is to make the proof carry the whole chain rather than a single
 -- inequality. 'deriveOrdRole' builds the 'Proof' constructor's context with
--- these two families, so matching on it releases one @c <= r@ per role at or
--- below @req@, all at once. The chain is discharged by exhaustive case analysis
--- on the two singletons in 'decideRole', where both roles are concrete and every
--- inequality reduces — so this costs no 'unsafeCoerce', unlike 'Member', whose
--- membership over an abstract held set cannot be decided this way.
+-- these families, so matching on it releases one 'Atleast' per role at or below
+-- @req@, all at once. The chain is discharged by exhaustive case analysis on the
+-- two singletons in 'decideRole', where both roles are concrete and every pair
+-- resolves to a generated instance — so this costs no 'unsafeCoerce', unlike
+-- 'Member', whose membership over an abstract held set cannot be decided this
+-- way.
+--
+-- A note on why 'Atleast' is a class and not the equality it abbreviates. A
+-- stuck /Constraint-kinded type family/ is not a viable encoding here: GHC
+-- matches an irreducible family application in a given far too coarsely, and
+-- will discharge a stuck @Needs 'Editor r@ wanted from a stuck @Needs 'Viewer r@
+-- given — silently admitting the escalation this module exists to prevent. A
+-- class constraint is matched precisely, so the hierarchy holds.
 
--- | Every role in @cs@ is at or below @r@. A conjunction of @(c <= r) ~ 'True@,
--- one per element.
+-- | Evidence, as a constraint, that role @r@ is at or above @req@. This is what
+-- @IsAtleast\<Con\>@ abbreviates and what a hierarchical 'Proof' releases.
+--
+-- It is a marker class rather than the equality @(req <= r) ~ 'True@ purely for
+-- the error message. Both encodings reject and accept exactly the same
+-- programs, but a stuck @<=@ on a promoted type surfaces singletons' internal
+-- @Compare@/@Case_@ helpers, which says nothing to the person reading it. A
+-- class can carry a 'TypeError' instead.
+-- 'deriveOrdRole' generates one instance per pair that genuinely holds, and
+-- there is deliberately no catch-all. An unmet requirement is therefore an
+-- /unsolved/ constraint, which matters twice over: GHC reports it as a plain
+-- @No instance for (Atleast 'Admin r)@, and under @-fdefer-type-errors@ it
+-- becomes an error thunk the test suite can force. A catch-all carrying a
+-- 'TypeError' would read better still, but it has to be @INCOHERENT@ to fire at
+-- a rigid @r@, and the deferred error then sits in an unused instance context
+-- where nothing ever demands it — leaving the privilege-escalation guard unable
+-- to tell a rejection from an acceptance. A testable hierarchy is worth more
+-- than a prettier message.
+class Atleast (req :: k) (r :: k) where
+  -- | Forces this dictionary, and does nothing else. Ordinary code never calls
+  -- it; every 'Atleast' is discharged by a gate's proof and nothing demands the
+  -- (empty) dictionary.
+  --
+  -- It exists so that a /rejected/ requirement stays observable. Under
+  -- @-fdefer-type-errors@ an unsolved 'Atleast' compiles to a dictionary bound
+  -- to an error thunk, and with no method to project, a rejection and an
+  -- acceptance are indistinguishable at runtime — which would leave the test
+  -- suite's privilege-escalation guard passing whether or not the hierarchy
+  -- still held. Forcing this makes the rejection observable again.
+  atleastWitness :: Proxy req -> Proxy r -> ()
+  atleastWitness _ _ = ()
+
+-- | Every role in @cs@ is at or below @r@. A conjunction of @'Atleast' c r@, one
+-- per element.
 type family AtleastAll (cs :: [k]) (r :: k) :: Constraint where
   AtleastAll '[] _ = ()
-  AtleastAll (c ': cs) r = ((c <= r) ~ 'True, AtleastAll cs r)
+  AtleastAll (c ': cs) r = (Atleast c r, AtleastAll cs r)
 
 -- | The members of @allR@ that are at or below @req@ — the roles a gate on
 -- @req@ subsumes. @allR@ is the role type's full constructor list, which

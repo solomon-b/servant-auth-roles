@@ -6,7 +6,7 @@
 -- @-fdefer-type-errors@ so the deliberately-missing 'Decidable' instance becomes
 -- a runtime 'Control.Exception.TypeError' the spec can catch and inspect,
 -- instead of a compile error that would fail the build.
-module Servant.Auth.RolesErrorFixture (underivedDecidable, escalated) where
+module Servant.Auth.RolesErrorFixture (underivedDecidable, escalations) where
 
 import Servant.Auth.Roles.TH
 
@@ -39,16 +39,43 @@ $(deriveOrdRole ''Rank)
 
 newtype RankAuth (r :: Rank) = RankAuth String
 
-highOnly :: (IsAtleastHigh r) => RankAuth r -> String
-highOnly (RankAuth who) = "escalated by " <> who
+-- Each subroutine forces its own Atleast dictionary with atleastWitness.
+-- Without that the deferred error is never demanded — an Atleast dictionary is
+-- otherwise empty, so nothing projects from it — and every escalation below
+-- would appear to succeed at runtime even while the compiler was correctly
+-- rejecting it. The guard would then pass no matter what.
+midOnly :: forall r. (IsAtleastMid r) => RankAuth r -> String
+midOnly (RankAuth who) =
+  atleastWitness (Proxy @'Mid) (Proxy @r) `seq` ("mid by " <> who)
 
--- The Mid proof releases IsAtleastLow and IsAtleastMid, but not IsAtleastHigh,
--- so this call is rejected. Under -fdefer-type-errors it becomes the runtime
--- TypeError the spec forces.
-escalate :: Satisfies 'Mid RankAuth -> String
-escalate (Satisfies RankProof auth) = highOnly auth
+highOnly :: forall r. (IsAtleastHigh r) => RankAuth r -> String
+highOnly (RankAuth who) =
+  atleastWitness (Proxy @'High) (Proxy @r) `seq` ("high by " <> who)
 
-escalated :: String
-escalated = case decideRole (sing @'Mid) (sing @'Mid) of
-  Just proof -> escalate (Satisfies proof (RankAuth "mallory"))
-  Nothing -> "unreachable: Mid satisfies Mid"
+-- Run a gated subroutine behind a genuine proof for that gate (decideRole at
+-- gate <= gate always succeeds); only the requirement asked for is too strong.
+-- Written out per gate rather than shared through one kind-polymorphic helper:
+-- such a helper picks up deferred errors of its own, and a spec that only
+-- checked "something threw" would then pass on an unrelated kind mismatch while
+-- the hierarchy silently leaked.
+atLow :: (Satisfies 'Low RankAuth -> String) -> String
+atLow body = case decideRole (sing @'Low) (sing @'Low) of
+  Just proof -> body (Satisfies proof (RankAuth "mallory"))
+  Nothing -> "unreachable: a role always satisfies itself"
+
+atMid :: (Satisfies 'Mid RankAuth -> String) -> String
+atMid body = case decideRole (sing @'Mid) (sing @'Mid) of
+  Just proof -> body (Satisfies proof (RankAuth "mallory"))
+  Nothing -> "unreachable: a role always satisfies itself"
+
+-- | The three upward reaches in @Low < Mid < High@. Each must be rejected: a
+-- gate's proof discharges its own rung and every rung below, never one above.
+-- Each entry is @(label, alias the error must name, the offending call)@ — the
+-- spec asserts the message, so an unrelated deferred error cannot pass for a
+-- working hierarchy.
+escalations :: [(String, String, String)]
+escalations =
+  [ ("Low -> Mid", "IsAtleastMid r", atLow (\(Satisfies RankProof a) -> midOnly a)),
+    ("Low -> High", "IsAtleastHigh r", atLow (\(Satisfies RankProof a) -> highOnly a)),
+    ("Mid -> High", "IsAtleastHigh r", atMid (\(Satisfies RankProof a) -> highOnly a))
+  ]

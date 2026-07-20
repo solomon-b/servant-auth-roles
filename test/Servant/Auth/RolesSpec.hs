@@ -5,6 +5,7 @@
 module Servant.Auth.RolesSpec (spec) where
 
 import Control.Exception (SomeException, evaluate, try)
+import Control.Monad (forM_)
 import Control.Monad.Except (throwError)
 import Control.Monad.IO.Class (liftIO)
 import Data.ByteString (ByteString)
@@ -15,7 +16,7 @@ import Network.Wai.Test (SResponse)
 import Servant.API (Get, JSON, type (:<|>) (..), type (:>))
 import Servant.API.Experimental.Auth (AuthProtect)
 import Servant.Auth.Roles.TH
-import Servant.Auth.RolesErrorFixture (escalated, underivedDecidable)
+import Servant.Auth.RolesErrorFixture (escalations, underivedDecidable)
 import Servant.Server (Context (..), Handler, Server, err401, serveWithContext)
 import Servant.Server.Experimental.Auth (AuthHandler, AuthServerData, mkAuthHandler)
 import Test.Hspec (Spec, describe, expectationFailure, it, shouldContain, shouldReturn)
@@ -418,10 +419,18 @@ spec = do
           Right () -> expectationFailure "expected the guiding error, but it type-checked"
 
     -- The weakening chain runs downward only. A Mid gate releases IsAtleastLow
-    -- and IsAtleastMid; reaching for IsAtleastHigh must not type-check.
-    describe "privilege escalation is a type error" $
-      it "a Mid gate cannot call a High-gated subroutine" $ do
-        result <- try (evaluate (length escalated)) :: IO (Either SomeException Int)
-        case result of
-          Left e -> show e `shouldContain` "Could not deduce"
-          Right _ -> expectationFailure "escalation type-checked: the hierarchy leaks upward"
+    -- and IsAtleastMid; reaching for IsAtleastHigh must not type-check. The
+    -- message is asserted too: an escalation should say which role is missing,
+    -- not leak singletons' internal Compare/Case_ helpers.
+    describe "privilege escalation is a type error" $ do
+      it "every upward reach in Low < Mid < High is rejected" $
+        forM_ escalations $ \(label, wantedAlias, thunk) -> do
+          result <- try (evaluate (length thunk)) :: IO (Either SomeException Int)
+          case result of
+            -- Assert the message, not merely that something threw: the fixture
+            -- is compiled with -fdefer-type-errors, so any unrelated mistake in
+            -- it would also throw and would otherwise read as a passing guard.
+            Left e -> do
+              show e `shouldContain` "Could not deduce"
+              show e `shouldContain` wantedAlias
+            Right _ -> expectationFailure (label <> " type-checked: the hierarchy leaks upward")

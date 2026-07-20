@@ -73,6 +73,16 @@ deriveOrdRole n = do
       ]
       []
   builderDecs <- mkProofBuilder builder con k cons
+  -- One 'Atleast' instance per pair that genuinely holds. These are what the
+  -- builder's case analysis resolves against, and what keeps the INCOHERENT
+  -- error instance in "Servant.Auth.Roles" from firing on a valid requirement.
+  atleastInsts <-
+    sequence
+      [ TH.instanceD (pure []) [t|Atleast $(TH.promotedT lo) $(TH.promotedT hi)|] []
+      | (i, lo) <- zip [0 :: Int ..] cons,
+        (j, hi) <- zip [0 :: Int ..] cons,
+        i <= j
+      ]
   decidable <-
     [d|
       type instance ActualK (rq :: $k) = $k
@@ -84,7 +94,7 @@ deriveOrdRole n = do
       |]
   packer <- mkPacker n k
   aliases <- mkAtleastAliases n
-  pure (sings ++ allConsDec : proofDec : builderDecs ++ decidable ++ packer ++ aliases)
+  pure (sings ++ allConsDec : proofDec : atleastInsts ++ builderDecs ++ decidable ++ packer ++ aliases)
 
 -- | Generate @mk\<TypeName\>Proof@, which discharges the proof's weakening chain
 -- by case analysis on both singletons. Only the @i <= j@ pairs are matched: with
@@ -292,9 +302,9 @@ mkAliases prefix body n = do
       r <- TH.newName "r"
       TH.tySynD (TH.mkName (prefix ++ TH.nameBase c)) [TH.plainTV r] (body (TH.promotedT c) (TH.varT r))
 
--- | Aliases for the Ord scheme, @type IsAtleastAdmin r = ('Admin <= r) ~ 'True@.
+-- | Aliases for the Ord scheme, @type IsAtleastAdmin r = Atleast 'Admin r@.
 mkAtleastAliases :: TH.Name -> TH.Q [TH.Dec]
-mkAtleastAliases = mkAliases "IsAtleast" (\c r -> [t|($c <= $r) ~ 'True|])
+mkAtleastAliases = mkAliases "IsAtleast" (\c r -> [t|Atleast $c $r|])
 
 -- | Aliases for the Eq scheme, @type IsAdmin r = (r ~ 'Admin)@.
 mkIsAliases :: TH.Name -> TH.Q [TH.Dec]
