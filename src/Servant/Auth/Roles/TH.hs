@@ -37,13 +37,29 @@ import Servant.Auth.Roles
 
 -- | Hierarchical roles. Sufficiency is @required <= actual@ under the type's
 -- (derived) 'Ord'. Generates a proof constructor named @\<TypeName\>Proof@.
+--
+-- The proof is /weakening-closed/: matching on it releases @IsAtleast\<Con\>@
+-- for every role at or below the gate's, so an @'Admin@ handler can call an
+-- @IsAtleastViewer r =>@ subroutine directly. See "Servant.Auth.Roles" on
+-- hierarchy weakening for why the single inequality @req <= r@ is not enough.
 deriveOrdRole :: TH.Name -> TH.Q [TH.Dec]
 deriveOrdRole n = do
   sings <- concat <$> sequence [genSingletons [n], singEqInstances [n], singOrdInstances [n]]
+  cons <- roleConstructors n
   let k = TH.conT n
       con = TH.mkName (TH.nameBase n ++ "Proof")
+      allCons = TH.mkName ("All" ++ TH.nameBase n)
+      builder = TH.mkName ("mk" ++ TH.nameBase n ++ "Proof")
   req <- TH.newName "req"
   r <- TH.newName "r"
+  -- @type All<TypeName> = ('[ 'C1, 'C2, .. ] :: [<TypeName>])@, the constructor
+  -- list in declaration (hierarchy) order. Kind-annotated so it stays
+  -- unambiguous for a role type with no constructors.
+  allConsDec <-
+    TH.tySynD
+      allCons
+      []
+      [t|$(foldr (\c acc -> TH.promotedConsT `TH.appT` TH.promotedT c `TH.appT` acc) TH.promotedNilT cons) :: [$k]|]
   proofDec <-
     TH.dataInstD
       (pure [])
@@ -52,22 +68,66 @@ deriveOrdRole n = do
       Nothing
       [ TH.forallC
           []
-          (TH.cxt [[t|($(TH.varT req) <= $(TH.varT r)) ~ 'True|]])
+          (TH.cxt [[t|AtleastAll (LEQs $(TH.conT allCons) $(TH.varT req)) $(TH.varT r)|]])
           (TH.gadtC [con] [] [t|Proof $(TH.varT req) $(TH.varT r)|])
       ]
       []
+  builderDecs <- mkProofBuilder builder con k cons
   decidable <-
     [d|
       type instance ActualK (rq :: $k) = $k
 
       instance Decidable (rq :: $k) where
         decideRole a b = case a %<= b of
-          STrue -> Just $(TH.conE con)
+          STrue -> Just ($(TH.varE builder) a b)
           SFalse -> Nothing
       |]
   packer <- mkPacker n k
   aliases <- mkAtleastAliases n
-  pure (sings ++ proofDec : decidable ++ packer ++ aliases)
+  pure (sings ++ allConsDec : proofDec : builderDecs ++ decidable ++ packer ++ aliases)
+
+-- | Generate @mk\<TypeName\>Proof@, which discharges the proof's weakening chain
+-- by case analysis on both singletons. Only the @i <= j@ pairs are matched: with
+-- @(req <= r) ~ 'True@ given, GHC's coverage checker rules the rest out, so the
+-- match is total and warning-free without listing unreachable branches. At each
+-- pair both roles are concrete, every @c <= r@ in the chain reduces to @'True@,
+-- and the constructor applies.
+mkProofBuilder :: TH.Name -> TH.Name -> TH.Q TH.Type -> [TH.Name] -> TH.Q [TH.Dec]
+mkProofBuilder name con k cons = do
+  req <- TH.newName "req"
+  r <- TH.newName "r"
+  sq <- TH.newName "sq"
+  sr <- TH.newName "sr"
+  sig <-
+    TH.sigD
+      name
+      [t|
+        (($(TH.varT req) <= $(TH.varT r)) ~ 'True) =>
+        Sing ($(TH.varT req) :: $k) ->
+        Sing ($(TH.varT r) :: $k) ->
+        Proof $(TH.varT req) $(TH.varT r)
+        |]
+  def <-
+    TH.funD
+      name
+      [ TH.clause
+          [TH.varP sq, TH.varP sr]
+          ( TH.normalB $
+              TH.caseE
+                (TH.tupE [TH.varE sq, TH.varE sr])
+                [ TH.match (TH.tupP [singP lo, singP hi]) (TH.normalB (TH.conE con)) []
+                | (i, lo) <- indexed,
+                  (j, hi) <- indexed,
+                  i <= (j :: Int)
+                ]
+          )
+          []
+      ]
+  pure [sig, def]
+  where
+    indexed = zip [0 ..] cons
+    -- genSingletons names the singleton constructor for @C@ as @SC@.
+    singP c = TH.conP (TH.mkName ("S" ++ TH.nameBase c)) []
 
 -- | Flat, unordered roles. Sufficiency is exact equality (@required == actual@)
 -- via decidable equality. Generates a proof constructor @\<TypeName\>Proof@ and,

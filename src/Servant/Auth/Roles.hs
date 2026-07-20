@@ -36,6 +36,10 @@ module Servant.Auth.Roles
     withMember,
     withAllMembers,
 
+    -- * Hierarchy weakening
+    AtleastAll,
+    LEQs,
+
     -- * Auth wrappers
     SomeRole (..),
     Satisfies (..),
@@ -46,8 +50,10 @@ where
 
 import Control.Monad.IO.Class (liftIO)
 import Data.Kind (Constraint, Type)
+import Data.Ord.Singletons (type (<=))
 import Data.Proxy (Proxy (..))
 import Data.Singletons (Sing, SingI (..))
+import Data.Type.Bool (If)
 import GHC.TypeLits (ErrorMessage (..), Symbol, TypeError)
 import Network.Wai (Request)
 import Servant.API (type (:>))
@@ -212,6 +218,38 @@ withAllMembers ::
   r
 withAllMembers p body =
   p `seq` case reflectReqs (Proxy :: Proxy reqs) (Proxy :: Proxy ys) of Dict -> body
+
+--------------------------------------------------------------------------------
+-- Hierarchy weakening
+--
+-- A hierarchical gate on @req@ ought to satisfy every requirement /below/ @req@
+-- too: an 'Admin route should be able to call a @IsAtleastViewer r =>@
+-- subroutine. It does not follow automatically. In a handler the actual role @r@
+-- is a rigid type variable, so @'Viewer <= r@ is a stuck type family
+-- application, and getting there from the given @'Admin <= r@ needs transitivity
+-- of @<=@ — a lemma GHC's constraint solver never synthesizes for a promoted
+-- type. Without help, @IsAtleast\<Con\>@ is only usable at the gate's own role.
+--
+-- The fix is to make the proof carry the whole chain rather than a single
+-- inequality. 'deriveOrdRole' builds the 'Proof' constructor's context with
+-- these two families, so matching on it releases one @c <= r@ per role at or
+-- below @req@, all at once. The chain is discharged by exhaustive case analysis
+-- on the two singletons in 'decideRole', where both roles are concrete and every
+-- inequality reduces — so this costs no 'unsafeCoerce', unlike 'Member', whose
+-- membership over an abstract held set cannot be decided this way.
+
+-- | Every role in @cs@ is at or below @r@. A conjunction of @(c <= r) ~ 'True@,
+-- one per element.
+type family AtleastAll (cs :: [k]) (r :: k) :: Constraint where
+  AtleastAll '[] _ = ()
+  AtleastAll (c ': cs) r = ((c <= r) ~ 'True, AtleastAll cs r)
+
+-- | The members of @allR@ that are at or below @req@ — the roles a gate on
+-- @req@ subsumes. @allR@ is the role type's full constructor list, which
+-- 'deriveOrdRole' generates as @All\<TypeName\>@.
+type family LEQs (allR :: [k]) (req :: k) :: [k] where
+  LEQs '[] _ = '[]
+  LEQs (c ': cs) req = If (c <= req) (c ': LEQs cs req) (LEQs cs req)
 
 --------------------------------------------------------------------------------
 -- Auth wrappers

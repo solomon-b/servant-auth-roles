@@ -220,6 +220,7 @@ For a role type `T` with constructor `C`:
 | `TAllNil`, `TAllCons`            | `deriveMemberRole`              | subset witnesses for a required list                       |
 | `someT`                          | all three                       | packs a runtime role into `SomeRole`                       |
 | `IsAtleastC r`                   | `deriveOrdRole`                 | constraint alias for `('C <= r) ~ 'True`                   |
+| `AllT`                           | `deriveOrdRole`                 | the constructor list, in hierarchy order                   |
 | `IsC r`                          | `deriveEqRole`                  | constraint alias for `r ~ 'C`                              |
 | `HasC ps`                        | `deriveMemberRole`              | constraint alias for `Member 'C ps`                        |
 | `ActualK`, `Decidable` instances | all three                       | the relation itself                                        |
