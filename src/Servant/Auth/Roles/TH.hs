@@ -198,7 +198,7 @@ deriveMemberRole n = do
       thereC = TH.mkName (TH.nameBase n ++ "There")
       allNilC = TH.mkName (TH.nameBase n ++ "AllNil")
       allConsC = TH.mkName (TH.nameBase n ++ "AllCons")
-      strict = TH.bangType (TH.bang TH.noSourceUnpackedness TH.noSourceStrictness)
+      strict = TH.bangType (TH.bang TH.noSourceUnpackedness TH.sourceStrict)
   req <- TH.newName "req"
   ps <- TH.newName "ps"
   hd <- TH.newName "hd"

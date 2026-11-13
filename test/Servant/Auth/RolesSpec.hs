@@ -19,7 +19,7 @@ import Servant.Auth.Roles.TH
 import Servant.Auth.RolesErrorFixture (escalations, underivedDecidable)
 import Servant.Server (Context (..), Handler, Server, err401, serveWithContext)
 import Servant.Server.Experimental.Auth (AuthHandler, AuthServerData, mkAuthHandler)
-import Test.Hspec (Spec, describe, expectationFailure, it, shouldContain, shouldReturn)
+import Test.Hspec (Spec, anyErrorCall, describe, expectationFailure, it, shouldContain, shouldReturn, shouldThrow)
 import Test.Hspec.Wai (WaiSession, get, matchStatus, request, shouldRespondWith, with)
 import Test.Hspec.Wai.Internal (runWaiSession)
 
@@ -410,6 +410,17 @@ spec = do
       it "no auth -> 401" $ get "/read" `shouldRespondWith` 401
       it "no auth -> 401 (/readwrite)" $
         get "/readwrite" `shouldRespondWith` 401
+
+    -- A hand-built proof with a bottom inside must not release a constraint.
+    -- The proof fields are strict, so 'withMember' and 'withAllMembers' reach
+    -- the bottom when they force the proof.
+    describe "a partial proof releases no membership" $ do
+      it "withMember rejects a There over a bottom" $
+        evaluate (withMember (PermissionThere undefined :: Proof 'PermManage '[ 'PermRead]) ())
+          `shouldThrow` anyErrorCall
+      it "withAllMembers rejects an AllCons over bottoms" $
+        evaluate (withAllMembers (PermissionAllCons undefined undefined :: Proof '[ 'PermManage] '[ 'PermRead]) ())
+          `shouldThrow` anyErrorCall
 
     describe "developer experience: a role type with no deriver" $
       it "yields a guiding 'No Decidable instance' error" $ do
