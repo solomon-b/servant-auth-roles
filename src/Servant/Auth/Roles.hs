@@ -59,6 +59,7 @@ import GHC.TypeLits (ErrorMessage (..), Symbol, TypeError)
 import Network.Wai (Request)
 import Servant.API (type (:>))
 import Servant.API.Experimental.Auth (AuthProtect)
+import Servant.Auth.Roles.Internal (ProvenByGate)
 import Servant.Server
   ( Handler,
     HasContextEntry (..),
@@ -150,10 +151,15 @@ instance
 -- genuine witness that the membership it reflects actually holds.
 
 -- | Evidence, as a constraint, that @x@ is a member of the type-level list
--- @xs@. An empty marker class with no instances: it is introduced only by
--- 'withMember' / 'withAllMembers' from a 'Proof', so a @Member x xs@ constraint
--- can never be satisfied without a proof that the membership holds.
-class Member (x :: k) (xs :: [k])
+-- @xs@. It has no instances. 'withMember' and 'withAllMembers' introduce it
+-- from a 'Proof'.
+--
+-- The hidden superclass 'ProvenByGate' stops downstream code from writing an
+-- instance. It does not stop code that steps around the type checker on
+-- purpose: 'unsafeCoerce', a splice that names the hidden class, or
+-- @-fdefer-type-errors@, under which an unsolved @Member@ becomes a thunk that
+-- nothing forces.
+class (ProvenByGate x xs) => Member (x :: k) (xs :: [k])
 
 -- | Every element of the required list @reqs@ is a member of the held set @ys@.
 -- For a concrete @reqs@ this reduces to a tuple of 'Member' constraints.
@@ -167,6 +173,9 @@ data Dict c where
 
 -- | Trivially satisfied for every argument. Its (empty) dictionary is the
 -- representation-compatible source a 'Member' dictionary is coerced from.
+-- A class with one superclass and no methods has a newtype dictionary, so a
+-- 'Member' dictionary has the shape of a 'ProvenByGate' dictionary. That is
+-- empty, like this one. Nothing reads the contents of either.
 -- Internal, not exported.
 class Trivial (x :: k) (xs :: [k])
 
@@ -265,7 +274,12 @@ withAllMembers p body =
 -- where nothing ever demands it — leaving the privilege-escalation guard unable
 -- to tell a rejection from an acceptance. A testable hierarchy is worth more
 -- than a prettier message.
-class Atleast (req :: k) (r :: k) where
+--
+-- The hidden superclass 'ProvenByGate' stops downstream code from writing an
+-- instance by hand, such as an @INCOHERENT@ @Atleast 'Admin r@. Only
+-- 'deriveOrdRole' can emit the superclass instance, and it emits one per pair
+-- that holds. The same limits as for 'Member' apply.
+class (ProvenByGate req r) => Atleast (req :: k) (r :: k) where
   -- | Forces this dictionary, and does nothing else. Ordinary code never calls
   -- it; every 'Atleast' is discharged by a gate's proof and nothing demands the
   -- (empty) dictionary.

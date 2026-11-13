@@ -16,6 +16,8 @@ library
     Servant.Auth.Roles
     Servant.Auth.Roles.TH
 
+  other-modules:    Servant.Auth.Roles.Internal
+
   build-depends:
     , base             >=4.14 && <5
     , bytestring       >=0.10 && <0.13
