@@ -6,6 +6,10 @@ default:
 test:
     cabal test
 
+# Run all flake checks: the test suite and the compile-fail checks.
+check:
+    nix flake check -L
+
 # Format all Haskell sources under src/ and test/ in place.
 format:
     ormolu --mode inplace $(find src test -name '*.hs')

@@ -32,6 +32,7 @@ import Data.Kind (Type)
 import Data.Singletons.Base.TH
 import Language.Haskell.TH qualified as TH
 import Servant.Auth.Roles
+import Servant.Auth.Roles.Internal (ProvenByGate)
 
 --------------------------------------------------------------------------------
 
@@ -73,16 +74,21 @@ deriveOrdRole n = do
       ]
       []
   builderDecs <- mkProofBuilder builder con k cons
-  -- One 'Atleast' instance per pair that genuinely holds. These are what the
-  -- builder's case analysis resolves against, and what keeps the INCOHERENT
-  -- error instance in "Servant.Auth.Roles" from firing on a valid requirement.
+  -- One 'Atleast' instance per pair that holds, with the 'ProvenByGate'
+  -- instance that its superclass needs. The builder's case analysis resolves
+  -- against these. Downstream code cannot name 'ProvenByGate', so only this
+  -- splice can add a pair.
   atleastInsts <-
-    sequence
-      [ TH.instanceD (pure []) [t|Atleast $(TH.promotedT lo) $(TH.promotedT hi)|] []
-      | (i, lo) <- zip [0 :: Int ..] cons,
-        (j, hi) <- zip [0 :: Int ..] cons,
-        i <= j
-      ]
+    concat
+      <$> sequence
+        [ sequence
+            [ TH.instanceD (pure []) [t|ProvenByGate $(TH.promotedT lo) $(TH.promotedT hi)|] [],
+              TH.instanceD (pure []) [t|Atleast $(TH.promotedT lo) $(TH.promotedT hi)|] []
+            ]
+        | (i, lo) <- zip [0 :: Int ..] cons,
+          (j, hi) <- zip [0 :: Int ..] cons,
+          i <= j
+        ]
   decidable <-
     [d|
       type instance ActualK (rq :: $k) = $k
