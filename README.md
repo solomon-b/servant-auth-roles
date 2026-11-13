@@ -1,5 +1,7 @@
 # servant-auth-roles
 
+[![CI](https://github.com/solomon-b/servant-auth-roles/actions/workflows/ci.yml/badge.svg)](https://github.com/solomon-b/servant-auth-roles/actions/workflows/ci.yml)
+
 Role authorization for Servant.
 
 Define a plain role enum, run one Template Haskell splice on it, and gate routes
