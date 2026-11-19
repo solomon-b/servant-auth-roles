@@ -60,6 +60,7 @@ import Network.Wai (Request)
 import Servant.API (type (:>))
 import Servant.API.Experimental.Auth (AuthProtect)
 import Servant.Auth.Roles.Internal (ProvenByGate)
+import Servant.Links (HasLink (..))
 import Servant.Server
   ( Handler,
     HasContextEntry (..),
@@ -370,3 +371,11 @@ instance
                     { errBody = "Forbidden: insufficient permissions",
                       errHeaders = [("Content-Type", "text/plain; charset=utf-8")]
                     }
+
+-- | A link to a gated route is the link to the route below the gate. The gate
+-- reads the request and adds nothing to the path. This matches the instance
+-- for 'AuthProtect'.
+instance (HasLink api) => HasLink (RequireRole tag req :> api) where
+  type MkLink (RequireRole tag req :> api) a = MkLink api a
+
+  toLink toA _ = toLink toA (Proxy @api)
