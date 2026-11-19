@@ -10,16 +10,18 @@ import Control.Monad.Except (throwError)
 import Control.Monad.IO.Class (liftIO)
 import Data.ByteString (ByteString)
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
+import Data.Proxy (Proxy (..))
 import Network.HTTP.Types (Header, HeaderName, hAccept)
 import Network.Wai (Application, Request, requestHeaders)
 import Network.Wai.Test (SResponse)
-import Servant.API (Get, JSON, type (:<|>) (..), type (:>))
+import Servant.API (Capture, Get, JSON, type (:<|>) (..), type (:>))
 import Servant.API.Experimental.Auth (AuthProtect)
 import Servant.Auth.Roles.TH
 import Servant.Auth.RolesErrorFixture (escalations, underivedDecidable)
+import Servant.Links (linkURI, safeLink)
 import Servant.Server (Context (..), Handler, Server, err401, serveWithContext)
 import Servant.Server.Experimental.Auth (AuthHandler, AuthServerData, mkAuthHandler)
-import Test.Hspec (Spec, anyErrorCall, describe, expectationFailure, it, shouldContain, shouldReturn, shouldThrow)
+import Test.Hspec (Spec, anyErrorCall, describe, expectationFailure, it, shouldBe, shouldContain, shouldReturn, shouldThrow)
 import Test.Hspec.Wai (WaiSession, get, matchStatus, request, shouldRespondWith, with)
 import Test.Hspec.Wai.Internal (runWaiSession)
 
@@ -67,6 +69,10 @@ type RoleEditorAPI = RequireRole "role-auth" 'Editor :> "editor" :> Get '[JSON] 
 type RoleAdminAPI = RequireRole "role-auth" 'Admin :> "admin" :> Get '[JSON] String
 
 type RoleAPI = RoleViewerAPI :<|> RoleEditorAPI :<|> RoleAdminAPI
+
+-- A gated route with a capture. It checks that link parameters pass through
+-- the gate.
+type RoleUserAPI = RequireRole "role-auth" 'Admin :> "users" :> Capture "id" Int :> Get '[JSON] String
 
 roleServer :: Server RoleAPI
 roleServer = viewerH :<|> editorH :<|> adminH
@@ -421,6 +427,15 @@ spec = do
       it "withAllMembers rejects an AllCons over bottoms" $
         evaluate (withAllMembers (PermissionAllCons undefined undefined :: Proof '[ 'PermManage] '[ 'PermRead]) ())
           `shouldThrow` anyErrorCall
+
+    -- The gate reads the request, not the path, so a link ignores it.
+    describe "HasLink" $ do
+      it "links to a gated route inside a larger API" $
+        show (linkURI (safeLink (Proxy @RoleAPI) (Proxy @RoleAdminAPI)))
+          `shouldBe` "admin"
+      it "passes link parameters through the gate" $
+        show (linkURI (safeLink (Proxy @RoleUserAPI) (Proxy @RoleUserAPI) 5))
+          `shouldBe` "users/5"
 
     describe "developer experience: a role type with no deriver" $
       it "yields a guiding 'No Decidable instance' error" $ do
