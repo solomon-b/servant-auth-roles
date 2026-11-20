@@ -20,6 +20,11 @@
 -- 3. A 'Decidable' instance saying what "sufficient" means.
 -- 4. An 'AuthHandler' that reflects the runtime role into the index with
 --    @toSing@ and packs it as 'SomeRole'.
+-- 5. A 'RejectionHandler' that builds the response for a user whose role is
+--    insufficient. 'defaultRejectionHandler' gives a plain 403.
+--
+-- The 'AuthHandler' and the 'RejectionHandler' are both entries in the Servant
+-- context.
 module Servant.Auth.Roles
   ( -- * Combinator
     RequireRole,
@@ -44,6 +49,10 @@ module Servant.Auth.Roles
     -- * Auth wrappers
     SomeRole (..),
     Satisfies (..),
+
+    -- * Rejection
+    RejectionHandler (..),
+    defaultRejectionHandler,
   )
 where
 
@@ -53,7 +62,7 @@ import Control.Monad.IO.Class (liftIO)
 import Data.Kind (Constraint, Type)
 import Data.Ord.Singletons (type (<=))
 import Data.Proxy (Proxy (..))
-import Data.Singletons (Sing, SingI (..))
+import Data.Singletons (Demote, Sing, SingI (..), SingKind, fromSing)
 import Data.Type.Bool (If)
 import GHC.TypeLits (ErrorMessage (..), Symbol, TypeError)
 import Network.Wai (Request)
@@ -326,12 +335,66 @@ data Satisfies (req :: kr) (authF :: ka -> Type) where
   Satisfies :: Proof req r -> authF r -> Satisfies req authF
 
 --------------------------------------------------------------------------------
+-- Rejection
+
+-- | Builds the response for an authenticated user whose role does not satisfy
+-- the gate. 'RequireRole' reads it from the Servant context, as it reads the
+-- 'AuthHandler'.
+--
+-- The handler receives the request, the required role as a value, and the
+-- authenticated user. It runs in 'IO', so it can write a log entry.
+--
+-- @kr@ is the kind of the requirement and @authF@ is the role-indexed auth
+-- type. A gate on @req :: kr@ looks for the entry at that @kr@. An API with
+-- gates of two requirement kinds needs two entries. An example is a single
+-- permission and a permission list.
+--
+-- @
+-- rejection :: 'RejectionHandler' UserRole RoleAuth
+-- rejection = 'RejectionHandler' $ \\_request required ('SomeRole' _ auth) -> do
+--   putStrLn (rName auth <> " needs " <> show required)
+--   pure err403
+-- @
+--
+-- The rejection is non-fatal. Servant sends the 'ServerError' only if no later
+-- @(:\<|>)@ alternative accepts the request. The handler still runs for each
+-- gate that rejects.
+type RejectionHandler :: forall ka. Type -> (ka -> Type) -> Type
+newtype RejectionHandler kr authF = RejectionHandler
+  { runRejectionHandler ::
+      Request ->
+      Demote kr ->
+      SomeRole authF ->
+      IO ServerError
+  }
+
+-- | A 403 with the plain text body @Forbidden: insufficient permissions@.
+--
+-- The type variables are free, so select them where the context is built:
+--
+-- @
+-- 'defaultRejectionHandler' \@UserRole \@RoleAuth :. authHandler :. EmptyContext
+-- @
+defaultRejectionHandler :: forall kr {ka} (authF :: ka -> Type). RejectionHandler kr authF
+defaultRejectionHandler =
+  RejectionHandler $ \_ _ _ ->
+    pure
+      err403
+        { errBody = "Forbidden: insufficient permissions",
+          errHeaders = [("Content-Type", "text/plain; charset=utf-8")]
+        }
+
+--------------------------------------------------------------------------------
 -- Combinator
 
 -- | Authenticate and require that the user's role satisfies @req@ under the
 -- 'Decidable' relation. On success the handler receives a 'Satisfies' carrying
--- the proof. On failure it is a non-fatal 403, so @(:<|>)@ alternatives are
--- still tried.
+-- the proof.
+--
+-- On failure the gate calls the 'RejectionHandler' from the context and fails
+-- with the 'ServerError' that it returns. The failure is non-fatal, so
+-- @(:\<|>)@ alternatives are still tried. A failure of the 'AuthHandler' is
+-- fatal and does not call the 'RejectionHandler'.
 data RequireRole (tag :: Symbol) (req :: kr)
 
 instance
@@ -340,7 +403,9 @@ instance
     AuthServerData (AuthProtect tag) ~ SomeRole authF,
     Decidable req,
     SingI req,
-    HasContextEntry context (AuthHandler Request (SomeRole authF))
+    SingKind kr,
+    HasContextEntry context (AuthHandler Request (SomeRole authF)),
+    HasContextEntry context (RejectionHandler kr authF)
   ) =>
   HasServer (RequireRole tag req :> api) context
   where
@@ -357,20 +422,20 @@ instance
       authHandler' :: Request -> Handler (SomeRole authF)
       authHandler' = unAuthHandler (getContextEntry context)
 
+      rejectionHandler :: RejectionHandler kr authF
+      rejectionHandler = getContextEntry context
+
       authCheck :: Request -> DelayedIO (Satisfies req authF)
       authCheck rq = do
         eResult <- liftIO $ runHandler (authHandler' rq)
         case eResult of
           Left err -> delayedFailFatal err
-          Right (SomeRole sr authR) ->
+          Right someRole@(SomeRole sr authR) ->
             case decideRole (sing @req) sr of
               Just proof -> pure (Satisfies proof authR)
               Nothing ->
-                delayedFail
-                  err403
-                    { errBody = "Forbidden: insufficient permissions",
-                      errHeaders = [("Content-Type", "text/plain; charset=utf-8")]
-                    }
+                liftIO (runRejectionHandler rejectionHandler rq (fromSing (sing @req)) someRole)
+                  >>= delayedFail
 
 -- | A link to a gated route is the link to the route below the gate. The gate
 -- reads the request and adds nothing to the path. This matches the instance
