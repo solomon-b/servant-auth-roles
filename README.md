@@ -12,8 +12,10 @@ then be used by downstream code to demand the privilege in its type signature
 instead of re-checking it at runtime.
 
 - **401** when the auth handler rejects the request (fatal — no alternatives tried).
-- **403** when authentication succeeds but the role is insufficient (non-fatal —
-  Servant falls through to the next `:<|>` alternative).
+- **403** by default when authentication succeeds but the role is insufficient
+  (non-fatal — Servant falls through to the next `:<|>` alternative). Your app
+  supplies the response with a `RejectionHandler`, so it can send something
+  else. See [Custom rejection responses](#custom-rejection-responses).
 
 Three authorization schemes ship out of the box: hierarchical, exact match, and
 permission sets.
@@ -83,8 +85,13 @@ server = viewerH :<|> adminH
     adminH :: Satisfies 'Admin RoleAuth -> Handler String
     adminH (Satisfies UserRoleProof auth) = pure (banUser auth)
 
+-- 7. Put the auth handler and a rejection handler in the context. The
+-- rejection handler builds the response for a user whose role is too low.
+-- `defaultRejectionHandler` sends a plain 403.
 main :: IO ()
-main = run 3000 $ serveWithContext (Proxy @API) (authHandler :. EmptyContext) server
+main = run 3000 $ serveWithContext (Proxy @API) context server
+  where
+    context = defaultRejectionHandler @UserRole @RoleAuth :. authHandler :. EmptyContext
 ```
 
 ```console
@@ -210,6 +217,54 @@ readWriteH (Satisfies proof auth) =
   liftIO (withAllMembers proof (writeUser auth)) >> pure "read+write ok"
 ```
 
+## Custom rejection responses
+
+When the role is insufficient, the gate calls the `RejectionHandler` from the
+Servant context and fails with the `ServerError` that it returns. The context
+entry is mandatory. Use `defaultRejectionHandler` for a plain 403.
+
+The handler receives the request, the required role as a value, and the
+authenticated user. It runs in `IO`, so it can write a log entry. The response
+does not have to be an error. This handler for an HTMX app sends a 200 with a
+redirect:
+
+```haskell
+rejection :: RejectionHandler UserRole RoleAuth
+rejection = RejectionHandler $ \_request required (SomeRole _ auth) -> do
+  putStrLn (rName auth <> " was refused a route that requires " <> show required)
+  pure
+    ServerError
+      { errHTTPCode = 200,
+        errReasonPhrase = "OK",
+        errBody = "",
+        errHeaders = [("HX-Redirect", "/login")]
+      }
+
+context = rejection :. authHandler :. EmptyContext
+```
+
+`show required` needs a `Show` instance on `UserRole`. Use `fromSing` on the
+singleton in `SomeRole` to get the role of the user as a value.
+
+The first parameter of `RejectionHandler` is the type of the requirement, and
+the second is the auth type. A gate uses the entry for its requirement type. In
+the permission scheme, a single permission and a permission list are different
+types, so an API with both needs two entries:
+
+```haskell
+context =
+  defaultRejectionHandler @Permission @PermAuth
+    :. defaultRejectionHandler @[Permission] @PermAuth
+    :. authHandler
+    :. EmptyContext
+```
+
+A missing entry is a compile error (`No instance for HasContextEntry ...`).
+
+The rejection is non-fatal. On a path with more than one gated alternative, the
+handler runs for each gate that rejects, and Servant sends its result only if
+no later alternative accepts the request.
+
 ## What the splices generate
 
 For a role type `T` with constructor `C`:
@@ -236,8 +291,8 @@ derivers, and the singletons Prelude the generated code needs.
 
 ## Mixing with `AuthProtect`
 
-`RequireRole` and `AuthProtect` share one context entry and one `AuthServerData`
-instance, so they mix freely:
+`RequireRole` and `AuthProtect` share the `AuthHandler` context entry and one
+`AuthServerData` instance, so they mix freely:
 
 ```haskell
 type API =
@@ -254,7 +309,8 @@ profileH :: SomeRole RoleAuth -> Handler String
 profileH (SomeRole _ auth) = pure (rName auth)
 ```
 
-No extra context entries are needed for either.
+`AuthProtect` needs only the `AuthHandler` entry. `RequireRole` also needs the
+`RejectionHandler` entry.
 
 ## Without Template Haskell
 
