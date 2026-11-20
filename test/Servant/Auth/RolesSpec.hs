@@ -454,22 +454,15 @@ spec = do
         readIORef singles `shouldReturn` []
         readIORef lists `shouldReturn` [([PermRead, PermWrite], [PermManage])]
 
-      -- RoleAPI has sibling routes on other paths. Servant must not replace the
-      -- 200 with an error from one of them.
+      -- ChoiceAPI puts the gate next to a capture route, so Servant compares
+      -- the two failures. It must send the 200 unchanged, not the 404.
       it "a response that is not 4xx reaches the client unchanged" $ do
-        calls <- newIORef []
-        response <-
-          runWaiSession (roleReq "viewer" "/admin") (recordingRoleApp (Proxy @RoleAPI) roleServer calls redirect)
-        simpleStatus response `shouldBe` status200
-        simpleHeaders response `shouldBe` [("HX-Redirect", "/login")]
-        simpleBody response `shouldBe` ""
-
-      it "a response that is not 4xx wins against a 404 from a capture alternative" $ do
         calls <- newIORef []
         response <-
           runWaiSession (roleReq "viewer" "/admin") (recordingRoleApp (Proxy @ChoiceAPI) choiceServer calls redirect)
         simpleStatus response `shouldBe` status200
         simpleHeaders response `shouldBe` [("HX-Redirect", "/login")]
+        simpleBody response `shouldBe` ""
 
       it "fall-through: a later alternative answers and the rejection is not sent" $ do
         calls <- newIORef []
