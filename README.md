@@ -217,6 +217,28 @@ readWriteH (Satisfies proof auth) =
   liftIO (withAllMembers proof (writeUser auth)) >> pure "read+write ok"
 ```
 
+## A second requirement in the handler
+
+A gate gives one proof. Sometimes a route admits a low role, but a part of the
+response is for a higher role only. An example is a form field that only an
+admin can see and change. `satisfies` decides a second requirement against the
+same user. It gives a new `Satisfies` when the role satisfies the requirement,
+and `Nothing` when it does not:
+
+```haskell
+type PageAPI = RequireRole "role-auth" 'Viewer :> "page" :> Get '[JSON] String
+
+pageH :: Satisfies 'Viewer RoleAuth -> Handler String
+pageH auth@(Satisfies _ a) =
+  pure $ case satisfies @'Admin auth of
+    Just (Satisfies UserRoleProof admin) -> "viewer: " <> rName a <> "; " <> banUser admin
+    Nothing -> "viewer: " <> rName a
+```
+
+The `Just` branch holds an `'Admin` proof, so `banUser` type checks there and
+nowhere else in `pageH`. The check uses the `Decidable` instance, as a gate
+does, so it works with all three schemes.
+
 ## Custom rejection responses
 
 When the role is insufficient, the gate calls the `RejectionHandler` from the
