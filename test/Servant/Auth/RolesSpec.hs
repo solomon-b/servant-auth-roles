@@ -107,6 +107,25 @@ roleApp :: IO Application
 roleApp = pure $ serveWithContext (Proxy @RoleAPI) roleContext roleServer
 
 --------------------------------------------------------------------------------
+-- Test API (a second requirement decided in the handler)
+
+type RecheckAPI = RequireRole "role-auth" 'Viewer :> "page" :> Get '[JSON] String
+
+recheckServer :: Server RecheckAPI
+recheckServer = pageH
+  where
+    -- The gate admits every role. The Admin part needs a second proof, and
+    -- only 'satisfies' can give it here.
+    pageH :: Satisfies 'Viewer RoleAuth -> Handler String
+    pageH auth@(Satisfies UserRoleProof a) =
+      pure $ case satisfies @'Admin auth of
+        Just (Satisfies UserRoleProof admin) -> viewProfile a <> "; " <> banUser admin
+        Nothing -> viewProfile a
+
+recheckApp :: IO Application
+recheckApp = pure $ serveWithContext (Proxy @RecheckAPI) roleContext recheckServer
+
+--------------------------------------------------------------------------------
 -- Test API (same path, role-based fallthrough)
 --
 -- Routes ordered most-restrictive-first:
@@ -421,6 +440,18 @@ spec = do
             simpleStatus response `shouldBe` status403
             simpleHeaders response `shouldBe` [("Content-Type", "text/plain; charset=utf-8")]
             simpleBody response `shouldBe` "Forbidden: insufficient permissions"
+
+    -- The handler of a Viewer gate decides 'Admin with 'satisfies'. Only an
+    -- Admin gets the part that needs IsAtleastAdmin.
+    with recheckApp $
+      describe "satisfies: a second requirement in the handler" $ do
+        it "Viewer -> Viewer part only" $
+          roleReq "viewer" "/page" `shouldRespondWith` "\"viewed by Reed\"" {matchStatus = 200}
+        it "Editor -> Viewer part only" $
+          roleReq "editor" "/page" `shouldRespondWith` "\"viewed by Lyxia\"" {matchStatus = 200}
+        it "Admin  -> Viewer part and Admin part" $
+          roleReq "admin" "/page"
+            `shouldRespondWith` "\"viewed by Sandy; banned by Sandy\"" {matchStatus = 200}
 
     describe "custom rejection handler" $ do
       it "hierarchy: receives the required role and the user" $ do

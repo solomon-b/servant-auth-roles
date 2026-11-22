@@ -49,6 +49,7 @@ module Servant.Auth.Roles
     -- * Auth wrappers
     SomeRole (..),
     Satisfies (..),
+    satisfies,
 
     -- * Rejection
     RejectionHandler (..),
@@ -62,7 +63,7 @@ import Control.Monad.IO.Class (liftIO)
 import Data.Kind (Constraint, Type)
 import Data.Ord.Singletons (type (<=))
 import Data.Proxy (Proxy (..))
-import Data.Singletons (Demote, Sing, SingI (..), SingKind, fromSing)
+import Data.Singletons (Demote, Sing, SingI (..), SingKind, fromSing, withSingI)
 import Data.Type.Bool (If)
 import GHC.TypeLits (ErrorMessage (..), Symbol, TypeError)
 import Network.Wai (Request)
@@ -331,8 +332,35 @@ type family AuthFOf (ka :: Type) (e :: Type) :: ka -> Type where
 
 -- | What a 'RequireRole' handler receives. It holds the role-indexed auth value
 -- and a 'Proof' that its role satisfies requirement @req@.
+--
+-- The constructor also holds the singleton of the actual role, as a 'SingI'
+-- dictionary. 'satisfies' uses it to decide a second requirement. A pattern
+-- match needs no change for it.
 data Satisfies (req :: kr) (authF :: ka -> Type) where
-  Satisfies :: Proof req r -> authF r -> Satisfies req authF
+  Satisfies :: (SingI r) => Proof req r -> authF r -> Satisfies req authF
+
+-- | Decide whether the user of a 'Satisfies' also satisfies requirement
+-- @req'@. The result is 'Nothing' when the role does not satisfy it.
+--
+-- A handler can then show a part of a page only to a higher role, and it
+-- holds a 'Proof' for that part. A route gated at @'Staff@ can check for
+-- @'Admin@:
+--
+-- @
+-- handler auth = case 'satisfies' \@'Admin auth of
+--   Just ('Satisfies' UserRoleProof a) -> adminPage a
+--   Nothing -> staffPage
+-- @
+--
+-- The check runs at runtime, with the 'Decidable' instance of @req'@, as the
+-- check at a gate does.
+satisfies ::
+  forall {kr} {ka} {kr'} (req' :: kr') (req :: kr) (authF :: ka -> Type).
+  (ActualK req' ~ ka, Decidable req', SingI req') =>
+  Satisfies req authF ->
+  Maybe (Satisfies req' authF)
+satisfies (Satisfies _ (auth :: authF r)) =
+  (`Satisfies` auth) <$> decideRole (sing @req') (sing @r)
 
 --------------------------------------------------------------------------------
 -- Rejection
@@ -432,7 +460,7 @@ instance
           Left err -> delayedFailFatal err
           Right someRole@(SomeRole sr authR) ->
             case decideRole (sing @req) sr of
-              Just proof -> pure (Satisfies proof authR)
+              Just proof -> pure (withSingI sr (Satisfies proof authR))
               Nothing ->
                 liftIO (runRejectionHandler rejectionHandler rq (fromSing (sing @req)) someRole)
                   >>= delayedFail
